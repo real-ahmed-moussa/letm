@@ -1,0 +1,348 @@
+---
+title: "Life Expectancy Trend Modeler"
+author: "Dr. Ahmed Moussa"
+date: "January 2022"
+output:
+  html_document:
+    theme: flatly
+    toc: true
+    toc_float: true
+    code_folding: show
+    fig_width: 9
+    fig_height: 5
+---
+
+## 1. Overview
+
+Russia's annual life expectancy from 1800 to 2016 presents a non-monotone, three-phase trajectory that linear methods cannot capture: a stable pre-industrial baseline, a turbulent middle period with severe wartime disruptions (reaching a minimum of 16 years in 1943), and a late-century plateau near 70 years. This analysis applies two non-parametric smoothers — k-Nearest Neighbours (k-NN) regression and Gaussian kernel smoothing — across a range of bandwidth parameters (k ∈ {1, 3, 8, 25, 85}; h ∈ {0.5, 5, 10, 25, 85}) to characterise the bias-variance tradeoff inherent in flexible curve fitting. Intermediate parameter values best recover the data's three-phase structure, while extremes reveal classic failure modes: memorisation of noise at low smoothing and erasure of critical features at high smoothing. Gaussian kernel smoothing is preferred for its distance-weighted averaging and superior boundary behaviour.
+
+---
+
+## 2. Setup
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r libraries}
+library(FNN)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+set.seed(42)
+
+dir.create("figures", showWarnings = FALSE)
+
+theme_portfolio <- function() {
+  theme_minimal(base_family = "sans", base_size = 12) +
+  theme(
+    plot.title       = element_text(size = 14, face = "bold", color = "#0F1923", margin = margin(b = 8)),
+    plot.subtitle    = element_text(size = 11, color = "#444444", margin = margin(b = 12)),
+    plot.caption     = element_text(size = 9, color = "#888780", hjust = 0),
+    axis.title       = element_text(size = 11, color = "#444444"),
+    axis.text        = element_text(size = 10, color = "#666666"),
+    panel.grid.major = element_line(color = "#F0F0F0", linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background  = element_rect(fill = "white", color = NA),
+    legend.position  = "bottom",
+    legend.title     = element_text(size = 10, face = "bold"),
+    legend.text      = element_text(size = 10),
+    strip.text       = element_text(size = 11, face = "bold", color = "#0F1923")
+  )
+}
+
+palette_portfolio <- c("#378ADD", "#BA7517", "#1D9E75", "#5F5E5A", "#888780", "#0F1923")
+
+save_fig <- function(filename, width = 9, height = 5) {
+  ggsave(
+    filename = file.path("figures", filename),
+    width    = width,
+    height   = height,
+    dpi      = 150,
+    bg       = "white"
+  )
+}
+```
+
+---
+
+## 3. Data
+
+### 3.1 Loading & Structure
+
+```{r load-data}
+df <- read.csv("data/raw/LER.csv")
+glimpse(df)
+cat("Dimensions:", nrow(df), "rows ×", ncol(df), "columns\n\n")
+summary(df[, c("Year", "Life_Expectancy")])
+```
+
+### 3.2 Exploratory Data Analysis
+
+```{r eda-distribution}
+mean_le   <- mean(df$Life_Expectancy)
+median_le <- median(df$Life_Expectancy)
+
+ggplot(df, aes(x = Life_Expectancy)) +
+  geom_histogram(bins = 25, fill = palette_portfolio[1], color = "white", alpha = 0.85) +
+  geom_vline(xintercept = mean_le,   linetype = "dashed", color = palette_portfolio[2], linewidth = 0.8) +
+  geom_vline(xintercept = median_le, linetype = "dotted", color = palette_portfolio[3], linewidth = 0.8) +
+  annotate("text", x = mean_le + 1.5,   y = 20, label = paste0("Mean: ",   round(mean_le,   1)),
+           color = palette_portfolio[2], size = 3.5, hjust = 0) +
+  annotate("text", x = median_le - 1.5, y = 20, label = paste0("Median: ", round(median_le, 1)),
+           color = palette_portfolio[3], size = 3.5, hjust = 1) +
+  labs(
+    title    = "Distribution of Russia's Life Expectancy (1800–2016)",
+    subtitle = "Right-skewed distribution reflects the long pre-industrial period of low life expectancy",
+    x        = "Life Expectancy (years)",
+    y        = "Count",
+    caption  = "Source: Russia historical life expectancy data — 217 annual observations"
+  ) +
+  theme_portfolio()
+
+save_fig("01_life-expectancy-distribution.png")
+```
+
+```{r eda-time-series}
+ggplot(df, aes(x = Year, y = Life_Expectancy)) +
+  geom_line(color  = palette_portfolio[6], linewidth = 0.45, alpha = 0.6) +
+  geom_point(color = palette_portfolio[6], size = 1.1, alpha = 0.7) +
+  annotate("point", x = 1943, y = df$Life_Expectancy[df$Year == 1943],
+           color = palette_portfolio[2], size = 3.5) +
+  annotate("text",  x = 1943, y = df$Life_Expectancy[df$Year == 1943] + 3.5,
+           label = "1943 min: 16.0 yrs", color = palette_portfolio[2], size = 3.2, hjust = 0.5) +
+  annotate("point", x = 2016, y = df$Life_Expectancy[df$Year == 2016],
+           color = palette_portfolio[3], size = 3.5) +
+  annotate("text",  x = 2010, y = df$Life_Expectancy[df$Year == 2016] - 3,
+           label = "2016 max: 70.87 yrs", color = palette_portfolio[3], size = 3.2, hjust = 1) +
+  labs(
+    title    = "Russia's Life Expectancy Over Time (1800–2016)",
+    subtitle = "Three-phase trajectory: pre-industrial baseline, wartime disruptions, and late-century plateau",
+    x        = "Year",
+    y        = "Life Expectancy (years)",
+    caption  = "Source: Russia historical life expectancy data — 217 annual observations"
+  ) +
+  theme_portfolio()
+
+save_fig("02_time-series-raw.png")
+```
+
+```{r eda-knn-fits}
+x      <- df$Year
+y      <- df$Life_Expectancy
+x_mesh <- seq(1800, 2016, length.out = 4341)
+
+k_values <- c(1, 3, 8, 25, 85)
+k_labels  <- paste0("k = ", k_values)
+
+knn_list <- lapply(k_values, function(k) {
+  data.frame(
+    Year            = x_mesh,
+    Life_Expectancy = knn.reg(train = matrix(x), test = matrix(x_mesh), y = y, k = k)$pred,
+    k_label         = paste0("k = ", k)
+  )
+})
+knn_df          <- bind_rows(knn_list)
+knn_df$k_label  <- factor(knn_df$k_label, levels = k_labels)
+knn_colors      <- setNames(palette_portfolio[1:5], k_labels)
+
+ggplot() +
+  geom_point(data = df, aes(x = Year, y = Life_Expectancy),
+             color = "#BBBBBB", size = 0.9, alpha = 0.6) +
+  geom_line(data = knn_df, aes(x = Year, y = Life_Expectancy, color = k_label),
+            linewidth = 0.7) +
+  scale_color_manual(values = knn_colors, name = "Neighbours (k)") +
+  labs(
+    title    = "k-NN Regression Fits Across Parameter Values",
+    subtitle = "Low k memorises noise; high k erases the 1943 wartime collapse (k = 8 or 25 best recovers all three phases)",
+    x        = "Year",
+    y        = "Life Expectancy (years)",
+    caption  = "Grey points = observed data. Predictions evaluated on a dense mesh of 4341 points (1800–2016)."
+  ) +
+  theme_portfolio()
+
+save_fig("03_knn-fits-comparison.png")
+```
+
+```{r eda-kernel-fits}
+h_values <- c(0.5, 5, 10, 25, 85)
+h_labels  <- paste0("h = ", h_values)
+
+kernel_list <- lapply(h_values, function(h) {
+  fit <- ksmooth(x, y, kernel = "normal", bandwidth = h,
+                 range.x = c(1800, 2016), n.points = 4341)
+  data.frame(
+    Year            = fit$x,
+    Life_Expectancy = fit$y,
+    h_label         = paste0("h = ", h)
+  )
+})
+kernel_df          <- bind_rows(kernel_list)
+kernel_df$h_label  <- factor(kernel_df$h_label, levels = h_labels)
+kernel_colors      <- setNames(palette_portfolio[1:5], h_labels)
+
+ggplot() +
+  geom_point(data = df, aes(x = Year, y = Life_Expectancy),
+             color = "#BBBBBB", size = 0.9, alpha = 0.6) +
+  geom_line(data = kernel_df, aes(x = Year, y = Life_Expectancy, color = h_label),
+            linewidth = 0.7) +
+  scale_color_manual(values = kernel_colors, name = "Bandwidth (h)") +
+  labs(
+    title    = "Gaussian Kernel Smoother Fits Across Bandwidth Values",
+    subtitle = "Intermediate bandwidths (h = 5–10) recover all three phases without memorising noise",
+    x        = "Year",
+    y        = "Life Expectancy (years)",
+    caption  = "Grey points = observed data. Gaussian (normal) kernel; bandwidth parameterisation matches ksmooth() default."
+  ) +
+  theme_portfolio()
+
+save_fig("04_kernel-fits-comparison.png")
+```
+
+```{r eda-bias-variance}
+actual_1943 <- df$Life_Expectancy[df$Year == 1943]
+actual_2015 <- df$Life_Expectancy[df$Year == 2015]
+
+k_seq <- 1:100
+h_seq <- seq(0.5, 85, length.out = 100)
+
+knn_err_1943 <- sapply(k_seq, function(k)
+  (actual_1943 - knn.reg(train = matrix(x), test = matrix(1943), y = y, k = k)$pred)^2
+)
+knn_err_2015 <- sapply(k_seq, function(k)
+  (actual_2015 - knn.reg(train = matrix(x), test = matrix(2015), y = y, k = k)$pred)^2
+)
+
+kernel_err_1943 <- sapply(h_seq, function(h) {
+  fit <- ksmooth(x, y, kernel = "normal", bandwidth = h,
+                 range.x = c(1800, 2016), n.points = 4341)
+  idx <- which.min(abs(fit$x - 1943))
+  (actual_1943 - fit$y[idx])^2
+})
+kernel_err_2015 <- sapply(h_seq, function(h) {
+  fit <- ksmooth(x, y, kernel = "normal", bandwidth = h,
+                 range.x = c(1800, 2016), n.points = 4341)
+  idx <- which.min(abs(fit$x - 2015))
+  (actual_2015 - fit$y[idx])^2
+})
+
+bv_knn <- data.frame(
+  param    = k_seq,
+  `1943 (wartime min)` = knn_err_1943,
+  `2015 (plateau)`     = knn_err_2015,
+  method   = "k-NN Regression",
+  check.names = FALSE
+) |> pivot_longer(cols = c(`1943 (wartime min)`, `2015 (plateau)`),
+                  names_to = "test_point", values_to = "squared_error")
+
+bv_kernel <- data.frame(
+  param    = h_seq,
+  `1943 (wartime min)` = kernel_err_1943,
+  `2015 (plateau)`     = kernel_err_2015,
+  method   = "Gaussian Kernel Smoothing",
+  check.names = FALSE
+) |> pivot_longer(cols = c(`1943 (wartime min)`, `2015 (plateau)`),
+                  names_to = "test_point", values_to = "squared_error")
+
+bv_df <- bind_rows(bv_knn, bv_kernel)
+bv_df$method <- factor(bv_df$method,
+                       levels = c("k-NN Regression", "Gaussian Kernel Smoothing"))
+
+ggplot(bv_df, aes(x = param, y = squared_error, color = test_point)) +
+  geom_line(linewidth = 0.85) +
+  facet_wrap(~ method, scales = "free_x") +
+  scale_color_manual(
+    values = c("1943 (wartime min)" = palette_portfolio[2],
+               "2015 (plateau)"     = palette_portfolio[1]),
+    name   = "Test point"
+  ) +
+  labs(
+    title    = "Bias–Variance Tradeoff: Squared Error at Stress-Test Points vs. Smoothing Parameter",
+    subtitle = "The 1943 wartime minimum is rapidly erased by increasing smoothness; the 2015 plateau is more forgiving",
+    x        = "Smoothing parameter (k for k-NN, h for kernel)",
+    y        = "Squared error",
+    caption  = "Left panel: k in {1..100}. Right panel: h in {0.5..85}. Error computed at each year's observed value."
+  ) +
+  theme_portfolio()
+
+save_fig("05_bias-variance-tradeoff.png", width = 10, height = 5)
+```
+
+---
+
+## 4. Preprocessing
+
+The dataset is clean and requires minimal preprocessing. The 217 annual observations contain no missing values, and Year serves as the sole predictor with Life Expectancy as the response. A dense prediction mesh of 4,341 equally-spaced points spanning 1800–2016 (approximately 20 × n) is constructed once and reused across all models to enable smooth curve visualisation and consistent pointwise evaluation.
+
+```{r preprocessing}
+cat("Missing values per column:\n")
+print(colSums(is.na(df)))
+
+x_mesh <- seq(from = 1800, to = 2016, length.out = 4341)
+cat(sprintf("\nPrediction mesh: %d points from %.0f to %.0f\n",
+            length(x_mesh), min(x_mesh), max(x_mesh)))
+```
+
+---
+
+## 5. Methodology
+
+### k-Nearest Neighbours Regression
+
+k-NN regression predicts at each mesh point as the unweighted average of the k nearest training observations, where proximity is purely temporal (single-predictor). Low k produces a locally responsive estimate that memorises individual data points; high k averages across distant historical periods, masking short-duration events such as the 1943 wartime famine. This method is appropriate here because it makes no distributional assumptions and directly captures the non-monotone, multi-phase structure of Russia's life expectancy — behaviour that parametric models cannot represent without manual segmentation.
+
+### Gaussian Kernel Smoothing
+
+Gaussian kernel smoothing assigns exponentially decaying weights to neighbours based on distance, controlled by bandwidth h. Unlike k-NN's flat neighbourhood weighting, the Gaussian kernel weights continuously, reducing the jagged artefacts that appear at region boundaries and in data-sparse intervals. This method is preferred for this dataset because Russia's data has uneven temporal density — sparse pre-industrial records, richer modern-era coverage — and continuous distance-weighting handles such inhomogeneity better than fixed-size neighbourhoods.
+
+---
+
+## 6. Model Training & Evaluation
+
+```{r eval-knn}
+cat("=== k-NN Regression: Pointwise MSE at Stress-Test Years ===\n\n")
+for (k in c(1, 3, 8, 25, 85)) {
+  p1943 <- knn.reg(train = matrix(x), test = matrix(1943), y = y, k = k)$pred
+  p2015 <- knn.reg(train = matrix(x), test = matrix(2015), y = y, k = k)$pred
+  cat(sprintf(
+    "k = %2d | 1943: pred = %5.2f, actual = 16.00, MSE = %7.2f  |  2015: pred = %5.2f, actual = 70.83, MSE = %6.2f\n",
+    k, p1943, (actual_1943 - p1943)^2, p2015, (actual_2015 - p2015)^2
+  ))
+}
+```
+
+```{r eval-kernel}
+cat("=== Gaussian Kernel Smoothing: Pointwise MSE at Stress-Test Years ===\n\n")
+for (h in c(0.5, 5, 10, 25, 85)) {
+  fit   <- ksmooth(x, y, kernel = "normal", bandwidth = h,
+                   range.x = c(1800, 2016), n.points = 4341)
+  p1943 <- fit$y[which.min(abs(fit$x - 1943))]
+  p2015 <- fit$y[which.min(abs(fit$x - 2015))]
+  cat(sprintf(
+    "h = %4.1f | 1943: pred = %5.2f, actual = 16.00, MSE = %7.2f  |  2015: pred = %5.2f, actual = 70.83, MSE = %6.2f\n",
+    h, p1943, (actual_1943 - p1943)^2, p2015, (actual_2015 - p2015)^2
+  ))
+}
+```
+
+---
+
+## 7. Results & Discussion
+
+Both k-NN and Gaussian kernel smoothing perform comparably across their parameter ranges — neither is definitively superior on this dataset. At maximum smoothing (k = 85, h = 85), both methods predict approximately 47 years at the 1943 wartime minimum (actual: 16 years), yielding MSE of 995.96 and 959.82 respectively; the prediction misses the observed value by nearly 32 years. At the 2015 near-maximum (actual: 70.83 years), k = 85 yields MSE = 104.54. These numbers confirm that maximum smoothing catastrophically fails at extreme historical disruptions by averaging out sharply localised features.
+
+At low smoothing (k = 1, h = 0.5), both methods memorise individual training points exactly, yielding near-zero error at the training observations but producing spiky, noisy curves that obscure all structure. Intermediate parameter values (k = 8 or k = 25; h = 5 or h = 10) best balance flexibility and smoothness, recovering Russia's three-phase trajectory without artefacts. The 1943 wartime collapse functions as a natural stress test: it is a single-year extreme that requires high local resolution to preserve and that any over-smoothed model will erase.
+
+Gaussian kernel smoothing is preferred for three structural advantages: (1) distance-weighted averaging produces fewer spike artefacts than k-NN's flat neighbourhood averaging; (2) superior boundary behaviour — k-NN exhibits artificial flattening at 1800 and 2016 because of fixed neighbourhood constraints; (3) greater robustness in data-sparse regions such as the pre-1850 period, where fixed-size k-NN neighbourhoods span longer temporal gaps than the Gaussian kernel's distance-weighted window.
+
+---
+
+## 8. Conclusions
+
+- Russia's life expectancy data (1800–2016) is an ideal benchmark for non-parametric smoothing: non-monotone, three-phase, with a severe wartime disruption at 1943 that linear methods cannot represent.
+- k-NN and Gaussian kernel smoothing perform comparably; neither is uniformly superior on this 217-observation dataset.
+- Both methods confirm the bias-variance tradeoff: low parameters (k = 1, h = 0.5) memorise noise; high parameters (k = 85, h = 85) erase historically significant events.
+- Gaussian kernel smoothing is preferred for its distance-weighted averaging, superior boundary behaviour, and greater robustness in data-sparse regions.
+- Non-parametric parameter selection is inherently problem-specific: intermediate values (k = 8–25; h = 5–10) are optimal here because preserving the 1943 wartime minimum is more important than minimising aggregate training error.
